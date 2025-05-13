@@ -4,3 +4,6 @@ scikit-learn~=1.6.1
 scipy~=1.13.1
 joblib~=1.4.2
 pyspark~=3.5.5
+implicit~=0.7.2
+matplotlib~=3.9.4
+torch~=2.7.0
