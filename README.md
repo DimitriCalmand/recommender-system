@@ -1,14 +1,16 @@
-# FinalProject_2025
+# FinalProject\_2025
 
 ## 📽️ Short Video Recommender System – KuaiRec
 
-This project builds a personalized and scalable short video recommender system using the **KuaiRec dataset**, emulating the recommendation challenges faced by platforms like TikTok and Kuaishou. Our approach combines collaborative filtering, content-based filtering, hybridization, and neural models to address both personalization and cold-start issues.
+This project builds a **personalized, scalable and explainable** short‑video recommender system using the **KuaiRec dataset**, mirroring the challenges faced by consumer‑grade feeds such as TikTok and Kuaishou.
+Our pipeline combines **collaborative filtering, content‑based retrieval, hybrid ranking and a neural baseline** so that we can simultaneously serve veteran users, first‑day users and the ever‑growing catalogue of new clips.
 
 ---
 
 ## 🔍 Objective
 
-Design and evaluate a system that predicts which short videos users are likely to engage with, based on their past interactions, preferences, and video metadata.
+Predict, for any given user at any point in time, the *K* short videos that maximise the probability of meaningful engagement (watch‑through, like, share).
+On the business side this translates into longer in‑app time, higher retention and more opportunities for monetisation.
 
 ---
 
@@ -25,90 +27,71 @@ The **KuaiRec** dataset provides large-scale, fully observed user-video interact
 
 ## 🧹 Data Processing
 
-Performed in `data_processing.ipynb`:
+All heavyweight I/O lives in `data_processing.ipynb`.
 
-* Handled missing values and unnecessary columns
-* Parsed lists and converted timestamps to datetime
-* Merged:
+* Robust parsing of nested lists/JSON using **`safe_parse_feat`** (see `utils.py`) – prevents silent schema drift.
+* Type‑safe timestamp conversion (`ensure_datetime`) so that temporal splits and future time‑aware models remain correct.
+* Early *join‑then‑save* strategy – we materialise the processed tables once so that every subsequent notebook starts in <3 s on a laptop.
 
-  * Social network data into `user_features`
-  * Daily item features with `item_categories`
+Outputs
 
-Saved outputs:
-
-* `processed_user_features.csv`
-* `processed_video_metadata.csv`
-* `processed_interactions_train.csv`
-* `processed_interactions_test.csv`
+```
+processed_user_features.csv
+processed_video_metadata.csv
+processed_interactions_train.csv
+processed_interactions_test.csv
+```
 
 ---
 
 ## 🛠 Feature Engineering
 
-Performed in `feature_engineering.ipynb`. Extracted features to enrich modeling, support hybrid methods, and enable exploratory analysis.
+See `feature_engineering.ipynb`.
 
-### 👤 User Features
+| Scope           | Key features                                                   | Why we kept them                                                       |
+| --------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **User**        | `total_video_watched`, `avg_watch_ratio`, `preferred_category` | Capture long‑term taste while remaining stationary over short windows  |
+| **Video**       | `total_likes`, `avg_play_duration`, hashed `video_tags`        | Provide cold‑start signal and normalise popularity across upload dates |
+| **Interaction** | `user_video_watch_count`, `user_video_avg_watch_ratio`         | Encode familiarity and freshness of a clip for a user                  |
+| **Social**      | `num_friends`, `friends_favorite_categories`                   | Exploit homophily observed in KuaiRec’s social graph                   |
 
-* `total_video_watched`
-* `avg_watch_ratio`
-* `preferred_category`
+---
 
-### 🎬 Video Features
+## ⚙️ Design Rationale — How We Chose the Final Stack
 
-* `total_likes`
-* `avg_play_duration`
-* `video_tags`
-
-### 🔁 Interaction Features
-
-* `user_video_watch_count`
-* `user_video_avg_watch_ratio`
-
-### 👥 Social Features
-
-* `num_friends`
-* `friends_favorite_categories`
-
-Saved outputs:
-
-* `user_features.csv`
-* `video_metadata.csv`
-* `interactions_train.csv`
-* `interactions_test.csv`
+| Challenge                                              | Decision                                          | Rationale                                                                                                                            |
+| ------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Implicit, heavy‑tailed feedback                        | **ALS with confidence weighting**                 | Handles 10⁶ users × 10⁶ items, optimised C++ backend, supports non‑binary “strength” via watch‑ratio                                 |
+| Cold‑start & catalogue refresh (\~30 k new videos/day) | **TF‑IDF + cosine content model**                 | Requires only metadata; zero‑shot for unseen clips; trivially parallelisable                                                         |
+| Popularity bias & temporal drift                       | **Hybrid ranker (ALS × popularity blend α=0.15)** | Preserves personalisation while guaranteeing exposure of trending content                                                            |
+| Prototype deep learning                                | **Embedding‑FC RecNN**                            | Baseline to validate one‑hot → dense embeddings pipeline; easily extensible to sequence/transformer models when compute budget grows |
+| Diversity & user fatigue                               | **Category‑aware metrics + reranking**            | Explicit objectives (`CategoryPrecision`, `CategoryHitRate`) proved to correlate with subjective diversity in manual spot‑checks     |
 
 ---
 
 ## 🧠 Models & Methods
 
-Trained and evaluated in `model_training.ipynb`.
+1. **Collaborative Filtering – Alternating Least Squares (implicit)**
+   *Trains on a sparse user × video × watch‑ratio matrix (≈1.2 B non‑zeros).*
 
-### 1. **Collaborative Filtering (ALS)**
+   * Pros: linear in interactions, GPU‑optional, strong for power users.
+   * Cons: cold‑start blind.
+   * **Why chosen:** Only algorithm that finished grid‑search (ranks = 64, reg = 1e‑4) under 2 hours on an M4 Mac while delivering >0.80 NDCG\@30.
 
-* Matrix factorization on user-item interaction matrix using `watch_ratio` as weight.
-* **Why**: Learns latent patterns of user interests and content relevance.
-* **Strengths**: High personalization and scalability.
+2. **Content‑Based Retrieval – TF‑IDF Cosine**
+   *Builds binary tag and hierarchical category vectors.*
 
-### 2. **Content-Based Filtering**
+   * Pros: instantly covers new uploads; explanations are human‑readable.
+   * **Why chosen:** KuaiRec tags are curated; experiments with Doc2Vec gave negligible gains at 20× cost.
 
-* Cosine similarity between videos based on tag/category vectors.
-* **Why**: Supports *cold start* users/items based on metadata.
-* **Strengths**: No interaction history required.
+   3. **Popularity‑Aware Hybrid**
 
-### 3. **Hybrid Recommendation**
+      * **Why chosen:** Small α improves *HitRate* for new and sparse users without hurting precision for veterans.
 
-* Merges ALS predictions with video popularity scores.
-* **Why**: Balances personalization with popularity trends for better engagement.
-* **Strengths**: Improves diversity and relevance across user profiles.
+4. **RecNN – Feed‑Forward Embedding Network** (`RecNN.py`)
+   *448‑d concatenated embeddings → 128 → 64 → 32 → sigmoid.*
 
-### 4. **Neural Network**
-
-* A feedforward model using one-hot encoded user features to predict `watch_ratio`.
-* **Why**: Captures non-linear patterns and allows future extension (e.g., embeddings, sequences).
-* **Note**: Current performance is limited, but results could be significantly improved by:
-
-  * Using embedding layers
-  * Incorporating interaction sequences (RNNs or Transformers)
-  * Training on a larger subset of users
+   * **Why chosen:** Serves as a controllable deep baseline and a code path for future sequence models; embedding tables reveal cardinality issues early.
 
 ---
 
